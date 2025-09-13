@@ -1,0 +1,49 @@
+# CRITICAL: Environment variables and secrets
+.env
+.env.local
+.env.production
+.env.development
+.env.test
+
+# API Keys and Secrets (extra protection)
+**/api_keys.json
+**/secrets.json
+**/*secret*
+**/*key*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Trading Analysis Results
+results/
+trading_analysis_results/
+*.md
+!README.md
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Cache
+cache/
+.cache/
+*.cache
