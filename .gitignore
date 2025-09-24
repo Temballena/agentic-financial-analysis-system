@@ -20,7 +20,6 @@ __pycache__/
 # Trading Analysis Results
 results/
 trading_analysis_results/
-*.md
 !README.md
 
 # Virtual environments

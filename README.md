@@ -44,6 +44,18 @@ Financial trading analysis system with dual AI architectures: multi-agent collab
 - Professional rate limiting and fallback protection
 - Multiple trading strategies (swing, day trading, value, momentum)
 
+## Example Analysis Outputs
+
+See real analysis examples demonstrating both system architectures:
+
+### Multi-Agent Analysis
+- [Amazon (AMZN) Comprehensive Analysis](analysis_examples/multi-agent-analysis/AMZN_Analysis.md) - Full 4-agent collaborative analysis
+
+### Single-Agent Analysis  
+- [Tesla (TSLA) Quick Analysis](analysis_examples/single-agent-analysis/TSLA_Analysis.md) - Rapid single-agent screening
+
+*These examples showcase the depth and quality of analysis provided by each system architecture.*
+
 ## System Selection
 
 Choose between architectures based on your needs:
