@@ -2,6 +2,7 @@
 import warnings
 warnings.filterwarnings('ignore')
 import os
+import re
 from dotenv import load_dotenv
 load_dotenv()
 import numpy as np
@@ -315,8 +316,28 @@ class SmartYahooCache:
 # Global cache instance
 _smart_cache = SmartYahooCache()
 
+def _get_risk_free_rate() -> float:
+    """
+    Fetch the current 3-month Treasury bill rate from Yahoo Finance (^IRX).
+    Falls back to a recent-history default if the fetch fails.
+    The ^IRX quote is already in percent, so divide by 100.
+    """
+    try:
+        irx = yf.Ticker("^IRX")
+        hist = irx.history(period="5d")
+        if not hist.empty:
+            latest = hist['Close'].iloc[-1]
+            # Sanity check: T-bill yields realistically sit between 0% and 20%
+            if 0 <= latest <= 20:
+                return float(latest) / 100.0
+    except (KeyError, IndexError, ValueError, AttributeError) as e:
+        print(f"⚠️ Risk-free rate fetch failed ({e}), using fallback")
+
+    # Fallback: a reasonable mid-cycle default. Better than the old 2%.
+    return 0.045
+
 @tool
-def enhanced_financial_data_tool(ticker: str, period: str = "1y", interval: str = "1d", 
+def enhanced_financial_data_tool(ticker: str, period: str = "1y", interval: str = "1d",
                                 include_indicators: bool = True) -> str:
     """
     Enhanced financial data tool with smart caching.
@@ -325,71 +346,114 @@ def enhanced_financial_data_tool(ticker: str, period: str = "1y", interval: str 
     NOW WITH SMART CACHING: Fetches once, reuses intelligently.
     """
     global _smart_cache
-    
+
+    # Normalize ticker for consistent cache keys
+    ticker = ticker.strip().upper() if ticker else ticker
+
     # Get cached data (fetches 2y if needed)
     cached = _smart_cache.get_ticker_data(ticker)
-    
+
     if cached is None:
         return f"Error: Unable to fetch data for {ticker}"
-    
+
     # Slice to requested period
     hist = _smart_cache.slice_history(cached['history'], period)
-    
+
     if hist.empty:
         return f"Error: No data found for {ticker} in period {period}"
-    
-    # Calculate indicators (same as original)
+
+    # Map interval to annualization factor (periods per year) for volatility
+    interval_periods_per_year = {
+        "1m": 252 * 6.5 * 60,
+        "5m": 252 * 6.5 * 12,
+        "15m": 252 * 6.5 * 4,
+        "30m": 252 * 6.5 * 2,
+        "60m": 252 * 6.5,
+        "1h": 252 * 6.5,
+        "1d": 252,
+        "5d": 252 / 5,
+        "1wk": 52,
+        "1mo": 12,
+        "3mo": 4,
+    }
+    periods_per_year = interval_periods_per_year.get(interval, 252)
+
+    # Calculate indicators
     if include_indicators and len(hist) > 20:
         # Moving averages
         hist['SMA_20'] = hist['Close'].rolling(window=20).mean()
         hist['SMA_50'] = hist['Close'].rolling(window=50).mean() if len(hist) > 50 else np.nan
         hist['EMA_12'] = hist['Close'].ewm(span=12).mean()
         hist['EMA_26'] = hist['Close'].ewm(span=26).mean()
-        
-        # Volatility
+
+        # Volatility (annualized for the actual bar interval)
         hist['Returns'] = hist['Close'].pct_change()
-        hist['Volatility'] = hist['Returns'].rolling(window=20).std() * np.sqrt(252)
-        
-        # RSI calculation
+        hist['Volatility'] = hist['Returns'].rolling(window=20).std() * np.sqrt(periods_per_year)
+
+        # RSI calculation with proper edge-case handling
         delta = hist['Close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss.replace(0, np.nan)
-        hist['RSI'] = 100 - (100 / (1 + rs))
-        
+        gain = delta.where(delta > 0, 0.0).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0.0)).rolling(window=14).mean()
+
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs))
+
+        # Peg edge cases: all-gain -> 100, all-loss -> 0, flat -> 50
+        rsi = rsi.where(~((gain > 0) & (loss == 0)), 100.0)
+        rsi = rsi.where(~((gain == 0) & (loss > 0)), 0.0)
+        rsi = rsi.where(~((gain == 0) & (loss == 0)), 50.0)
+        hist['RSI'] = rsi
+
         # MACD
         hist['MACD'] = hist['EMA_12'] - hist['EMA_26']
         hist['MACD_Signal'] = hist['MACD'].ewm(span=9).mean()
-        
+
         # Bollinger Bands
         hist['BB_Middle'] = hist['Close'].rolling(window=20).mean()
         bb_std = hist['Close'].rolling(window=20).std()
         hist['BB_Upper'] = hist['BB_Middle'] + (bb_std * 2)
         hist['BB_Lower'] = hist['BB_Middle'] - (bb_std * 2)
 
-    # Analysis summary (exact same format as original)
+    # Analysis summary
     current_price = hist['Close'].iloc[-1]
     price_change = ((current_price - hist['Close'].iloc[-2]) / hist['Close'].iloc[-2]) * 100 if len(hist) > 1 else 0
     volume_avg = hist['Volume'].tail(20).mean() if len(hist) > 20 else hist['Volume'].mean()
     latest_volume = hist['Volume'].iloc[-1]
     volume_ratio = latest_volume / volume_avg if volume_avg > 0 else 1.0
 
+    # Period-aware high/low labels
+    period_labels = {
+        "1d": "1-Day", "5d": "5-Day", "1mo": "1-Month", "3mo": "3-Month",
+        "6mo": "6-Month", "1y": "52-Week", "2y": "2-Year", "5y": "5-Year",
+        "max": "All-Time"
+    }
+    range_label = period_labels.get(period, period)
+    trading_days = len(hist)
+
+    high_in_period = hist['High'].max()
+    low_in_period = hist['Low'].min()
+    range_pct = ((current_price - low_in_period) / (high_in_period - low_in_period) * 100) \
+        if high_in_period > low_in_period else 50.0
+
     # Safe indicator access with fallbacks
     rsi_value = f"{hist['RSI'].iloc[-1]:.1f}" if 'RSI' in hist.columns and not pd.isna(hist['RSI'].iloc[-1]) else "N/A"
     macd_value = f"{hist['MACD'].iloc[-1]:.3f}" if 'MACD' in hist.columns and not pd.isna(hist['MACD'].iloc[-1]) else "N/A"
-    
-    # Calculate SMA percentages safely
+
     if 'SMA_20' in hist.columns and not pd.isna(hist['SMA_20'].iloc[-1]):
         sma20_pct = f"{((current_price - hist['SMA_20'].iloc[-1]) / hist['SMA_20'].iloc[-1] * 100):.2f}%"
     else:
         sma20_pct = "N/A"
-        
+
     if 'SMA_50' in hist.columns and not pd.isna(hist['SMA_50'].iloc[-1]):
         sma50_pct = f"{((current_price - hist['SMA_50'].iloc[-1]) / hist['SMA_50'].iloc[-1] * 100):.2f}%"
     else:
         sma50_pct = "N/A"
-    
-    volatility_value = f"{hist['Volatility'].iloc[-1]:.2f}" if 'Volatility' in hist.columns and not pd.isna(hist['Volatility'].iloc[-1]) else "N/A"
+
+    volatility_value = (
+        f"{hist['Volatility'].iloc[-1]:.2f}"
+        if 'Volatility' in hist.columns and not pd.isna(hist['Volatility'].iloc[-1])
+        else "N/A"
+    )
     bb_upper = f"${hist['BB_Upper'].iloc[-1]:.2f}" if 'BB_Upper' in hist.columns and not pd.isna(hist['BB_Upper'].iloc[-1]) else "N/A"
     bb_lower = f"${hist['BB_Lower'].iloc[-1]:.2f}" if 'BB_Lower' in hist.columns and not pd.isna(hist['BB_Lower'].iloc[-1]) else "N/A"
 
@@ -399,9 +463,9 @@ COMPREHENSIVE ANALYSIS FOR {ticker}:
 PRICE DATA:
 - Current Price: ${current_price:.2f}
 - Daily Change: {price_change:.2f}%
-- 52-Week High: ${hist['High'].max():.2f}
-- 52-Week Low: ${hist['Low'].min():.2f}
-- Current vs 52-week range: {((current_price - hist['Low'].min()) / (hist['High'].max() - hist['Low'].min()) * 100):.1f}%
+- {range_label} High: ${high_in_period:.2f}
+- {range_label} Low: ${low_in_period:.2f}
+- Current vs {range_label} range: {range_pct:.1f}% (based on {trading_days} trading days)
 
 VOLUME ANALYSIS:
 - Average Volume (20-day): {volume_avg:,.0f}
@@ -413,7 +477,7 @@ TECHNICAL INDICATORS:
 - MACD: {macd_value}
 - Price vs SMA20: {sma20_pct}
 - Price vs SMA50: {sma50_pct}
-- Volatility (20-day): {volatility_value}%
+- Volatility (20-period, annualized from {interval} bars): {volatility_value}
 
 SUPPORT/RESISTANCE LEVELS:
 - Recent Support: ${hist['Low'].tail(20).min():.2f}
@@ -433,23 +497,24 @@ def market_sentiment_tool(ticker: str, days_back: int = 7) -> str:
     NOW WITH SMART CACHING: Reuses fetched data intelligently.
     """
     global _smart_cache
-    
+
+    # Normalize ticker for consistent cache keys
+    ticker = ticker.strip().upper() if ticker else ticker
+
     # Get cached data
     cached = _smart_cache.get_ticker_data(ticker)
-    
+
     if cached is None:
         return f"Error analyzing {ticker}: Unable to fetch data"
-    
-    # Use cached info and news
+
     info = cached['info']
     company_name = info.get('longName', ticker)
-    
-    # Handle analyst recommendations with proper error checking
+
+    # Handle analyst recommendations with narrowed exception
     rec_summary = {"No recent recommendations": 1}
     try:
         recommendations = cached['recommendations']
         if recommendations is not None and not recommendations.empty:
-            # Check what columns actually exist
             if 'To Grade' in recommendations.columns:
                 latest_rec = recommendations.tail(5)
                 rec_summary = latest_rec['To Grade'].value_counts().to_dict()
@@ -457,36 +522,65 @@ def market_sentiment_tool(ticker: str, days_back: int = 7) -> str:
                 latest_rec = recommendations.tail(5)
                 rec_summary = latest_rec['Recommendation'].value_counts().to_dict()
             else:
-                # Just count the recommendations without grade details
-                rec_summary = {f"Recent recommendations": len(recommendations.tail(5))}
-    except Exception as e:
+                rec_summary = {"Recent recommendations": len(recommendations.tail(5))}
+    except (KeyError, AttributeError, TypeError) as e:
         rec_summary = {"Recommendations unavailable": str(e)}
 
-    # News sentiment (simplified but robust)
+    # News sentiment with word-boundary matching and per-headline scoring
     sentiment_score = 0
     news_titles = []
+    articles_analyzed = 0
+    news_fetch_status = "ok"
+
+    sentiment_words_positive = [
+        'growth', 'profit', 'profits', 'beat', 'beats', 'strong', 'bullish',
+        'upgrade', 'upgraded', 'buy', 'gain', 'gains', 'rise', 'rises',
+        'high', 'highs', 'rally', 'surge', 'soar', 'jump'
+    ]
+    sentiment_words_negative = [
+        'loss', 'losses', 'decline', 'declines', 'weak', 'bearish',
+        'downgrade', 'downgraded', 'sell', 'concern', 'concerns',
+        'fall', 'falls', 'drop', 'drops', 'low', 'lows', 'plunge', 'slump'
+    ]
+
+    # Word boundaries prevent "beat" from matching "beat down" or "low" matching "lower"
+    pos_pattern = re.compile(r'\b(' + '|'.join(sentiment_words_positive) + r')\b', re.IGNORECASE)
+    neg_pattern = re.compile(r'\b(' + '|'.join(sentiment_words_negative) + r')\b', re.IGNORECASE)
+
     try:
         news = cached['news']
         if news:
-            news_titles = [item.get('title', '') for item in news[:10]]
-            sentiment_words_positive = ['growth', 'profit', 'beat', 'strong', 'bullish', 'upgrade', 'buy', 'gain', 'rise', 'high']
-            sentiment_words_negative = ['loss', 'decline', 'weak', 'bearish', 'downgrade', 'sell', 'concern', 'fall', 'drop', 'low']
-            
-            positive_count = sum(1 for title in news_titles 
-                               for word in sentiment_words_positive 
-                               if word.lower() in title.lower())
-            negative_count = sum(1 for title in news_titles 
-                               for word in sentiment_words_negative 
-                               if word.lower() in title.lower())
-            
+            news_titles = [item.get('title', '') for item in news[:10] if item.get('title')]
+            articles_analyzed = len(news_titles)
+
+            # Per-headline net scoring: each headline contributes at most +1, -1, or 0
+            positive_count = 0
+            negative_count = 0
+            for title in news_titles:
+                pos_hits = len(set(m.group(0).lower() for m in pos_pattern.finditer(title)))
+                neg_hits = len(set(m.group(0).lower() for m in neg_pattern.finditer(title)))
+                if pos_hits > neg_hits:
+                    positive_count += 1
+                elif neg_hits > pos_hits:
+                    negative_count += 1
+                # Ties (mixed-sentiment headlines) contribute nothing
+
             if positive_count + negative_count > 0:
                 sentiment_score = (positive_count - negative_count) / (positive_count + negative_count)
         else:
-            news_titles = ["No recent news available"]
-    except Exception as e:
-        news_titles = [f"News fetch error: {str(e)}"]
+            news_fetch_status = "no_news"
+    except (KeyError, TypeError, AttributeError) as e:
+        news_fetch_status = f"fetch_error: {e}"
 
-    # Interpret sentiment
+    # Build display-friendly headline list (separate from the real count)
+    if articles_analyzed > 0:
+        headline_display = news_titles
+    elif news_fetch_status == "no_news":
+        headline_display = ["(no recent news available)"]
+    else:
+        headline_display = [f"(news unavailable: {news_fetch_status})"]
+
+    # Interpret news sentiment
     if sentiment_score > 0.3:
         news_sentiment = "Positive"
     elif sentiment_score < -0.3:
@@ -499,20 +593,23 @@ def market_sentiment_tool(ticker: str, days_back: int = 7) -> str:
     try:
         buy_keywords = ['buy', 'strong buy', 'outperform', 'overweight', 'positive']
         sell_keywords = ['sell', 'strong sell', 'underperform', 'underweight', 'negative']
-        
-        buy_count = sum(count for rec, count in rec_summary.items() 
+
+        buy_count = sum(count for rec, count in rec_summary.items()
                        if any(keyword in str(rec).lower() for keyword in buy_keywords))
-        sell_count = sum(count for rec, count in rec_summary.items() 
+        sell_count = sum(count for rec, count in rec_summary.items()
                         if any(keyword in str(rec).lower() for keyword in sell_keywords))
-        
+
         if buy_count > sell_count * 1.5:
             analyst_sentiment = "Bullish"
         elif sell_count > buy_count * 1.5:
             analyst_sentiment = "Bearish"
-    except:
+    except Exception as e:
+        # Log-and-continue: rec_summary shape varies, so broad catch is justified,
+        # but surface the failure rather than swallowing it silently.
+        print(f"⚠️ Analyst sentiment scoring failed unexpectedly: "
+              f"{type(e).__name__}: {e}")
         analyst_sentiment = "Unknown"
 
-    # Build sentiment analysis output
     sentiment_analysis = f"""
 MARKET SENTIMENT ANALYSIS FOR {ticker} ({company_name}):
 
@@ -521,9 +618,9 @@ ANALYST RECOMMENDATIONS:
 
 NEWS SENTIMENT:
 - Sentiment Score: {sentiment_score:.2f} (Range: -1 to +1)
-- Recent Headlines: {len(news_titles)} articles analyzed
-- Key Headlines:
-{chr(10).join([f"  • {title[:100]}..." if len(title) > 100 else f"  • {title}" for title in news_titles[:5]])}
+- Articles Analyzed: {articles_analyzed}
+- Recent Headlines:
+{chr(10).join([f"  • {title[:100]}..." if len(title) > 100 else f"  • {title}" for title in headline_display[:5]])}
 
 SENTIMENT INTERPRETATION:
 - News Sentiment: {news_sentiment}
@@ -578,61 +675,103 @@ def portfolio_analysis_tool(tickers: str, weights: str = "equal") -> str:
     Analyzes portfolio composition, diversification, correlation,
     and suggests optimization strategies.
     """
+    global _smart_cache
     try:
-        ticker_list = [t.strip() for t in tickers.split(',')]
-        
+        # Normalize and dedupe ticker list (preserves order)
+        ticker_list = [t.strip().upper() for t in tickers.split(',') if t.strip()]
+        seen = set()
+        ticker_list = [t for t in ticker_list if not (t in seen or seen.add(t))]
+
         if len(ticker_list) < 2:
             return "Portfolio analysis requires at least 2 stocks"
 
-        # Fetch data for all stocks
+        # Fetch data through the shared cache
         data = {}
+        failed_tickers = []
         for ticker in ticker_list:
-            try:
-                stock = yf.Ticker(ticker)
-                hist = stock.history(period="1y")
-                if not hist.empty:
-                    data[ticker] = hist['Close']
-            except:
+            cached = _smart_cache.get_ticker_data(ticker)
+            if cached is None or cached.get('history') is None:
+                failed_tickers.append(ticker)
                 continue
 
-        if len(data) < 2:
-            return "Could not fetch sufficient data for portfolio analysis"
+            hist = _smart_cache.slice_history(cached['history'], '1y')
+            if hist is not None and not hist.empty:
+                data[ticker] = hist['Close']
+            else:
+                failed_tickers.append(ticker)
 
-        # Create portfolio dataframe
+        if failed_tickers:
+            print(f"⚠️ Could not get history for: {failed_tickers}")
+
+        if len(data) < 2:
+            return (f"Could not fetch sufficient data for portfolio analysis. "
+                    f"Got data for {list(data.keys())}, failed: {failed_tickers}")
+
+        # Filter ticker list to successful fetches so weights still align
+        ticker_list = [t for t in ticker_list if t in data]
+
+        # Build returns DataFrame
         portfolio_df = pd.DataFrame(data)
         portfolio_df = portfolio_df.dropna()
-
-        # Calculate returns
         returns = portfolio_df.pct_change().dropna()
 
         # Correlation matrix
         correlation_matrix = returns.corr()
 
-        # Portfolio statistics
+        # Parse weights with explicit error reporting
+        weight_warnings = []
+
         if weights == "equal":
-            weight_values = np.array([1/len(ticker_list)] * len(ticker_list))
+            weight_values = np.array([1.0 / len(ticker_list)] * len(ticker_list))
         else:
             try:
                 weight_list = [float(w.strip()) for w in weights.split(',')]
-                if len(weight_list) == len(ticker_list):
-                    weight_values = np.array(weight_list)
-                    weight_values = weight_values / weight_values.sum()
+            except ValueError as e:
+                weight_warnings.append(
+                    f"⚠️ Could not parse weights '{weights}' ({e}). Falling back to equal weights."
+                )
+                weight_list = None
+
+            if weight_list is None:
+                weight_values = np.array([1.0 / len(ticker_list)] * len(ticker_list))
+            elif len(weight_list) != len(ticker_list):
+                weight_warnings.append(
+                    f"⚠️ Weight count mismatch: got {len(weight_list)} weights for "
+                    f"{len(ticker_list)} tickers. Falling back to equal weights."
+                )
+                weight_values = np.array([1.0 / len(ticker_list)] * len(ticker_list))
+            else:
+                weight_array = np.array(weight_list, dtype=float)
+                weight_sum = weight_array.sum()
+
+                if weight_sum <= 0:
+                    weight_warnings.append(
+                        f"⚠️ Weight sum is {weight_sum:.4f} (must be positive). "
+                        f"Falling back to equal weights."
+                    )
+                    weight_values = np.array([1.0 / len(ticker_list)] * len(ticker_list))
                 else:
-                    weight_values = np.array([1/len(ticker_list)] * len(ticker_list))
-            except:
-                weight_values = np.array([1/len(ticker_list)] * len(ticker_list))
+                    weight_values = weight_array / weight_sum
+                    if not np.isclose(weight_sum, 1.0, atol=0.01):
+                        weight_warnings.append(
+                            f"ℹ️ Weights summed to {weight_sum:.4f}, normalized to 1.0."
+                        )
+
+        # Print warnings immediately so they're visible during runs
+        for warning in weight_warnings:
+            print(warning)
 
         # Individual stock statistics
         individual_returns = returns.mean() * 252
         individual_volatility = returns.std() * np.sqrt(252)
-        
-        # Portfolio-level statistics  
+
+        # Portfolio-level statistics
         portfolio_return = np.sum(individual_returns * weight_values)
         portfolio_variance = np.dot(weight_values.T, np.dot(returns.cov() * 252, weight_values))
         portfolio_volatility = np.sqrt(portfolio_variance)
-        
-        # Sharpe ratios
-        risk_free_rate = 0.02
+
+        # Sharpe ratios with dynamic risk-free rate
+        risk_free_rate = _get_risk_free_rate()
         individual_sharpe = (individual_returns - risk_free_rate) / individual_volatility
         portfolio_sharpe = (portfolio_return - risk_free_rate) / portfolio_volatility
 
@@ -641,11 +780,16 @@ PORTFOLIO ANALYSIS:
 
 COMPOSITION:
 {', '.join([f"{ticker}: {weight:.1%}" for ticker, weight in zip(ticker_list, weight_values)])}
+"""
 
+        if weight_warnings:
+            analysis += "\nWEIGHT NOTES:\n" + "\n".join(weight_warnings) + "\n"
+
+        analysis += f"""
 PORTFOLIO METRICS:
 - Expected Return: {portfolio_return:.1%}
 - Volatility: {portfolio_volatility:.1%}
-- Sharpe Ratio: {portfolio_sharpe:.2f}
+- Sharpe Ratio: {portfolio_sharpe:.2f} (risk-free rate: {risk_free_rate:.2%})
 
 CORRELATION MATRIX:
 {correlation_matrix.round(3).to_string()}
@@ -660,7 +804,7 @@ INDIVIDUAL STOCK METRICS:
 
         # Diversification analysis
         avg_correlation = correlation_matrix.values[np.triu_indices_from(correlation_matrix.values, k=1)].mean()
-        
+
         pairs = []
         for i in range(len(correlation_matrix.columns)):
             for j in range(i+1, len(correlation_matrix.columns)):
@@ -668,7 +812,7 @@ INDIVIDUAL STOCK METRICS:
                 if abs(corr) > 0.7:
                     pairs.append(f"{correlation_matrix.columns[i]}-{correlation_matrix.columns[j]}: {corr:.2f}")
         high_corr_pairs = pairs[:3] if pairs else ["None above 0.7 threshold"]
-        
+
         analysis += f"""
 DIVERSIFICATION METRICS:
 - Average Correlation: {avg_correlation:.3f}
