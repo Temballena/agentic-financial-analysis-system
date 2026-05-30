@@ -208,107 +208,175 @@ _, manager_llm = setup_claude_llms(api_config)
 class SmartYahooCache:
     """
     Minimalist cache that fetches once, slices many times.
-    Maintains exact output format expected by agents.
+    Uses per-component TTLs so price data refreshes frequently while
+    fundamentals stay cached for hours.
+
+    Component TTLs:
+    - history: 5 minutes (price-sensitive)
+    - news: 15 minutes (headlines matter for sentiment)
+    - recommendations: 1 hour (analyst updates trickle in)
+    - info: 24 hours (fundamentals barely change)
     """
-    
+
+    # Per-component TTLs in seconds
+    TTL_HISTORY = 300          # 5 minutes
+    TTL_NEWS = 900             # 15 minutes
+    TTL_RECOMMENDATIONS = 3600  # 1 hour
+    TTL_INFO = 86400           # 24 hours
+
     def __init__(self):
-        self.ticker_data = {}  # ticker -> {data, info, timestamp}
-        self.ttl = 300  # 5 minutes for price data
+        # ticker -> {'history': ..., 'history_ts': ...,
+        #            'info': ..., 'info_ts': ...,
+        #            'news': ..., 'news_ts': ...,
+        #            'recommendations': ..., 'recommendations_ts': ...,
+        #            'ticker_obj': ...}
+        self.ticker_data = {}
         self.api_calls = 0
         self.cache_hits = 0
-        
+
+    @staticmethod
+    def _normalize_ticker(ticker: str) -> str:
+        """Canonicalize ticker symbols for consistent cache keys."""
+        return ticker.strip().upper() if ticker else ticker
+
+    def _is_fresh(self, entry: dict, component: str, ttl: float) -> bool:
+        """Check whether a specific cached component is still within its TTL."""
+        ts_key = f"{component}_ts"
+        if component not in entry or ts_key not in entry:
+            return False
+        return (time.time() - entry[ts_key]) < ttl
+
     def get_ticker_data(self, ticker: str, force_refresh: bool = False):
-        """Fetch or return cached data for ticker"""
-        
-        current_time = time.time()
-        
-        # Check if we have valid cached data
-        if ticker in self.ticker_data and not force_refresh:
-            cache_age = current_time - self.ticker_data[ticker]['timestamp']
-            if cache_age < self.ttl:
-                self.cache_hits += 1
-                print(f"✅ CACHE HIT: {ticker} (saved API call #{self.cache_hits})")
-                return self.ticker_data[ticker]
-        
-        # Need fresh data
-        print(f"🌐 Fetching fresh Yahoo data for {ticker}")
+        """
+        Fetch or return cached data for ticker.
+        Returns a dict with the same shape callers expect:
+        {'history', 'info', 'news', 'recommendations', 'timestamp', 'ticker_obj'}
+        Each component is independently refreshed when stale.
+        """
+        ticker = self._normalize_ticker(ticker)
+        entry = self.ticker_data.get(ticker, {})
+
+        # Determine which components need refresh
+        needs_history = force_refresh or not self._is_fresh(entry, 'history', self.TTL_HISTORY)
+        needs_info = force_refresh or not self._is_fresh(entry, 'info', self.TTL_INFO)
+        needs_news = force_refresh or not self._is_fresh(entry, 'news', self.TTL_NEWS)
+        needs_recs = force_refresh or not self._is_fresh(entry, 'recommendations', self.TTL_RECOMMENDATIONS)
+
+        # If everything's fresh, return immediately
+        if not (needs_history or needs_info or needs_news or needs_recs):
+            self.cache_hits += 1
+            print(f"✅ CACHE HIT (all fresh): {ticker} (saved API call #{self.cache_hits})")
+            return self._unified_view(entry)
+
+        # Log which components are being refreshed
+        stale = [c for c, n in [('history', needs_history), ('info', needs_info),
+                                ('news', needs_news), ('recommendations', needs_recs)] if n]
+        print(f"🌐 Fetching {ticker} components: {stale}")
         self.api_calls += 1
-        
-        # Add small delay to respect rate limits
+
+        # Rate-limit courtesy delay between yfinance calls
         if self.api_calls > 1:
             time.sleep(2)
-        
+
         try:
-            stock = yf.Ticker(ticker)
-            
-            # Fetch maximum period we'll ever need (2 years)
-            hist = stock.history(period="2y", interval="1d")
-            
-            # Get info once (rarely changes)
-            info = stock.info
-            
-            # Get news once
-            news = stock.news if hasattr(stock, 'news') else []
-            
-            # Get recommendations once
-            try:
-                recommendations = stock.recommendations
-            except:
-                recommendations = pd.DataFrame()
-            
-            # Store everything
-            self.ticker_data[ticker] = {
-                'history': hist,
-                'info': info,
-                'news': news,
-                'recommendations': recommendations,
-                'timestamp': current_time,
-                'ticker_obj': stock
-            }
-            
-            return self.ticker_data[ticker]
-            
+            stock = entry.get('ticker_obj') or yf.Ticker(ticker)
+            entry['ticker_obj'] = stock
+            now = time.time()
+
+            if needs_history:
+                # Always fetch 2y so any period slice has the data it needs
+                entry['history'] = stock.history(period="2y", interval="1d")
+                entry['history_ts'] = now
+
+            if needs_info:
+                entry['info'] = stock.info
+                entry['info_ts'] = now
+
+            if needs_news:
+                entry['news'] = stock.news if hasattr(stock, 'news') else []
+                entry['news_ts'] = now
+
+            if needs_recs:
+                try:
+                    entry['recommendations'] = stock.recommendations
+                except (AttributeError, KeyError, ValueError, IndexError) as e:
+                    # Narrow catch: realistic yfinance failure modes for missing data
+                    print(f"ℹ️ Recommendations unavailable for {ticker}: {e}")
+                    entry['recommendations'] = pd.DataFrame()
+                entry['recommendations_ts'] = now
+
+            self.ticker_data[ticker] = entry
+            return self._unified_view(entry)
+
         except Exception as e:
             print(f"❌ Error fetching {ticker}: {e}")
+            # Return stale data if we have any rather than failing outright
+            if entry and any(k.endswith('_ts') for k in entry):
+                print(f"⚠️ Returning stale data for {ticker}")
+                return self._unified_view(entry)
             return None
-    
+
+    def _unified_view(self, entry: dict) -> dict:
+        """
+        Return the dict shape that callers (the tools) expect.
+        Keeps a single 'timestamp' for backward compatibility — uses the oldest
+        component timestamp so callers can reason about overall staleness.
+        """
+        component_timestamps = [
+            entry.get('history_ts', 0),
+            entry.get('info_ts', 0),
+            entry.get('news_ts', 0),
+            entry.get('recommendations_ts', 0),
+        ]
+        valid_timestamps = [t for t in component_timestamps if t > 0]
+        oldest = min(valid_timestamps) if valid_timestamps else 0
+
+        return {
+            'history': entry.get('history'),
+            'info': entry.get('info', {}),
+            'news': entry.get('news', []),
+            'recommendations': entry.get('recommendations', pd.DataFrame()),
+            'timestamp': oldest,
+            'ticker_obj': entry.get('ticker_obj'),
+        }
+
     def slice_history(self, hist: pd.DataFrame, period: str) -> pd.DataFrame:
-        """Slice history DataFrame to requested period"""
-        
+        """
+        Slice history DataFrame to requested period using trading-day row counts.
+        Matches what yfinance would return for the same period parameter.
+        """
         if hist is None or hist.empty:
             return hist
-            
-        period_days = {
+
+        # Trading-day counts (yfinance's actual conventions)
+        period_trading_days = {
             "1d": 1,
             "5d": 5,
-            "1mo": 30,
-            "3mo": 90,
-            "6mo": 180,
-            "1y": 365,
-            "2y": 730,
-            "5y": 1825,
-            "max": 99999
+            "1mo": 22,
+            "3mo": 65,
+            "6mo": 126,
+            "1y": 252,
+            "2y": 504,
+            "5y": 1260,
+            "max": None,
         }
-        
-        days = period_days.get(period, 365)
-        
-        # Calculate the date cutoff
-        end_date = hist.index[-1]
-        start_date = end_date - timedelta(days=days)
-        
-        # Slice the data
-        return hist[hist.index >= start_date].copy()
-    
+
+        rows = period_trading_days.get(period)
+        if rows is None or rows >= len(hist):
+            return hist.copy()
+
+        return hist.tail(rows).copy()
+
     def get_stats(self) -> str:
-        """Return cache statistics"""
-        total_calls_without_cache = self.api_calls + self.cache_hits
-        savings = (self.cache_hits / total_calls_without_cache * 100) if total_calls_without_cache > 0 else 0
-        
+        """Return cache statistics."""
+        total_requests = self.api_calls + self.cache_hits
+        savings = (self.cache_hits / total_requests * 100) if total_requests > 0 else 0
+
         return f"""
 🎯 Smart Yahoo Cache Statistics:
 - API Calls Made: {self.api_calls}
 - Cache Hits: {self.cache_hits}
-- Total Requests: {total_calls_without_cache}
+- Total Requests: {total_requests}
 - Cache Efficiency: {savings:.1f}%
 - Tickers Cached: {list(self.ticker_data.keys())}
 """
