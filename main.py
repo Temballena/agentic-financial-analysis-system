@@ -122,27 +122,18 @@ def setup_claude_llms(api_config: APIConfig):
             extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"}
         )
         
-        # Portfolio Manager: Premium Model for Final Decisions
-        try:
-            llm_configs['portfolio'] = LLM(
-                model="anthropic/claude-opus-4-20250514",
-                api_key=api_config.claude_api_key,
-                max_tokens=api_config.portfolio_manager_tokens,
-                timeout=180,
-                extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"}
-            )
-            print("Claude Opus assigned for premium portfolio decisions")
-        except:
-            llm_configs['portfolio'] = LLM(
-                model="anthropic/claude-sonnet-4-20250514",
-                api_key=api_config.claude_api_key,
-                max_tokens=api_config.portfolio_manager_tokens,
-                timeout=180,
-                extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"}
-            )
-            print("Claude Sonnet 4 fallback for portfolio decisions")
+        # Portfolio Manager: Opus 4 for final decisions. No silent fallback —
+        # if Opus isn't available on this account, fail loudly at startup.
+        llm_configs['portfolio'] = LLM(
+            model="anthropic/claude-opus-4-20250514",
+            api_key=api_config.claude_api_key,
+            max_tokens=api_config.portfolio_manager_tokens,
+            timeout=180,
+            extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"}
+        )
+        print("Claude Opus assigned for portfolio decisions")
         
-        # Manager LLM: Haiku for efficient coordination
+        # Manager LLM: sonnet for efficient coordination
         manager_llm = LLM(
             model="anthropic/claude-3-7-sonnet-20250219",
             api_key=api_config.claude_api_key,
@@ -1160,27 +1151,31 @@ class EnhancedTradingSystem:
 
     def fallback_single_agent_analysis(self, stock_selection: str, inputs: dict):
         """Fallback: Single comprehensive agent to avoid rate limits"""
-    
+
         print("🔄 FALLBACK: Single-agent comprehensive analysis")
-    
-    # Create single comprehensive agent
+
+        # Use the portfolio LLM since this fallback needs to do everything end-to-end.
+        # Instantiate search_tool locally — matches the pattern in create_enhanced_agents.
+        fallback_llm = self.llm_configs['portfolio']
+        search_tool = SerperDevTool()
+
         comprehensive_agent = Agent(
             role="Senior Financial Analyst",
             goal=f"Complete analysis of {stock_selection} for {inputs['trading_strategy_preference']}",
             backstory="Expert analyst with technical, sentiment, and risk expertise.",
             verbose=True,
             allow_delegation=False,
-            llm=self.llm,
+            llm=fallback_llm,
             tools=[enhanced_financial_data_tool, market_sentiment_tool, search_tool]
         )
-    
-    # Single comprehensive task
+
+        # Single comprehensive task
         comprehensive_task = Task(
             description=f"""
             Complete analysis for {stock_selection}:
-        
+
             1. TECHNICAL: Use enhanced_financial_data_tool("{stock_selection}", period="1y", include_indicators=True)
-            2. SENTIMENT: Use market_sentiment_tool("{stock_selection}", days_back=30)  
+            2. SENTIMENT: Use market_sentiment_tool("{stock_selection}", days_back=30)
             3. SEARCH: Look up recent news and analyst updates
             4. INTEGRATION: Provide BUY/SELL/HOLD recommendation
             5. LEVELS: Give specific entry/exit levels and stop-losses
@@ -1195,21 +1190,21 @@ class EnhancedTradingSystem:
             """,
             agent=comprehensive_agent
         )
-    
+
         try:
             time.sleep(10)  # Wait for rate limit reset
-        
+
             crew = Crew(
                 agents=[comprehensive_agent],
                 tasks=[comprehensive_task],
                 process=Process.sequential,
                 verbose=True
             )
-        
+
             result = crew.kickoff(inputs=inputs)
             print("✅ Fallback analysis successful!")
             return result
-        
+
         except Exception as e:
             print(f"❌ Fallback also failed: {e}")
             return None
@@ -1375,7 +1370,7 @@ class EnhancedTradingSystem:
         start_time = time.time()
         try:
             # Initial delay before starting
-            self.safe_delay()
+            self.professional_delay('initialization')
             
             result = crew.kickoff(inputs=inputs)
             
@@ -2060,11 +2055,11 @@ def run_ultimate_system():
 
 def run_enhanced_examples():
     """UPDATED: Run enhanced system examples with smart rate limiting"""
-    
+
     try:
         # Initialize system
         system = EnhancedTradingSystem(api_config)
-        
+
         print("🎯 CLAUDE-POWERED ANALYSIS OPTIONS (RATE-LIMIT OPTIMIZED)")
         print("Choose your analysis type:")
         print("1. Smart NVDA Analysis (Rate-limit optimized, full quality)")
@@ -2073,12 +2068,12 @@ def run_enhanced_examples():
         print("4. Portfolio Analysis Only (Correlation analysis)")
         print("5. Custom Stock Analysis (Enter your own ticker)")
         print("6. Single-Agent System (Recommended - No context issues)")
-        
-        choice = input("\nEnter choice (1-5): ").strip()
-        
+
+        choice = input("\nEnter choice (1-6): ").strip()
+
         if choice == "1":
             print("=== SMART NVDA ANALYSIS (RATE-LIMIT OPTIMIZED) ===")
-            result1 = system.smart_analyze_stock( 
+            return system.smart_analyze_stock(
                 stock_selection="NVDA",
                 initial_capital="250000",
                 risk_tolerance="Medium-High",
@@ -2086,71 +2081,61 @@ def run_enhanced_examples():
                 analysis_mode="smart",
                 save_to_file=True
             )
-            return result1, None, None
-            
+
         elif choice == "2":
             print("=== QUICK NVDA TEST (MINIMAL TOKENS) ===")
-            result2 = system.fallback_single_agent_analysis("NVDA", {
+            return system.fallback_single_agent_analysis("NVDA", {
                 'stock_selection': "NVDA",
                 'initial_capital': "250000",
                 'risk_tolerance': "Medium-High",
                 'trading_strategy_preference': "Growth momentum"
             })
-            return None, result2, None
-            
+
         elif choice == "3":
             print("=== SINGLE-AGENT COMPREHENSIVE ===")
-            # Use the optimized single-agent approach
-            result3 = system.fallback_single_agent_analysis("NVDA", {
+            return system.fallback_single_agent_analysis("NVDA", {
                 'stock_selection': "NVDA",
                 'initial_capital': "250000",
                 'risk_tolerance': "Medium-High",
                 'trading_strategy_preference': "Swing trading"
             })
-            return None, None, result3
-            
+
         elif choice == "4":
             print("=== PORTFOLIO ANALYSIS ONLY ===")
             portfolio_result = system.analyze_portfolio(
                 tickers=["AAPL", "GOOGL", "MSFT", "TSLA", "NVDA"]
             )
             print(portfolio_result)
-            return None, None, portfolio_result
-            
+            return portfolio_result
+
         elif choice == "5":
             print("=== CUSTOM STOCK ANALYSIS ===")
-            custom_ticker = input("Enter stock ticker: ").strip().upper()
-            if not custom_ticker:
-                custom_ticker = "AAPL"
-            
-            result_custom = system.smart_analyze_stock(
+            custom_ticker = input("Enter stock ticker: ").strip().upper() or "AAPL"
+            return system.smart_analyze_stock(
                 stock_selection=custom_ticker,
                 analysis_mode="smart",
                 save_to_file=True
             )
-            return result_custom, None, None
 
         elif choice == "6":
             print("=== SINGLE-AGENT SYSTEM (RECOMMENDED) ===")
             single_system = SingleAgentTradingSystem(api_config)
-            result = single_system.analyze_stock_comprehensive("NVDA")
-            return result, None, None
-        
+            return single_system.analyze_stock_comprehensive("NVDA")
+
         else:
             print("❌ Invalid choice. Running Smart NVDA analysis by default.")
-            result1 = system.smart_analyze_stock(
+            return system.smart_analyze_stock(
                 stock_selection="NVDA",
                 analysis_mode="smart",
                 save_to_file=True
             )
-            return result1, None, None
-        
+
     except ValueError as e:
         print(f"Configuration Error: {e}")
-        return None, None, None
+        return None
     except Exception as e:
         print(f"System Error: {e}")
-        return None, None, None
+        return None
 
 def run_single_analysis(stock_symbol: str = "AAPL", mode: str = "quick"):
     """Run a single analysis for command line usage"""
@@ -2170,6 +2155,42 @@ def run_single_analysis(stock_symbol: str = "AAPL", mode: str = "quick"):
     except Exception as e:
         print(f"❌ Single analysis failed: {e}")
         return None
+
+
+def _display_result(result):
+    """Display a result regardless of its shape (CrewOutput, dict, str, or None)."""
+    if result is None:
+        return False
+
+    print("\n" + "=" * 70)
+    print("📈 CLAUDE ANALYSIS RESULTS:")
+    print("=" * 70)
+
+    if isinstance(result, dict):
+        # Multi-stock results: ticker -> per-ticker result
+        for ticker, per_ticker_result in result.items():
+            print(f"\n--- {ticker} ---")
+            content = (per_ticker_result.raw if hasattr(per_ticker_result, 'raw')
+                       else str(per_ticker_result))
+            try:
+                display(Markdown(content))
+            except (NameError, AttributeError):
+                print(content)
+    elif isinstance(result, str):
+        # Plain string (e.g., portfolio analysis text)
+        try:
+            display(Markdown(result))
+        except (NameError, AttributeError):
+            print(result)
+    else:
+        # CrewOutput or similar object with .raw
+        content = result.raw if hasattr(result, 'raw') else str(result)
+        try:
+            display(Markdown(content))
+        except (NameError, AttributeError):
+            print(content)
+
+    return True
 
 # --- Main Execution ---
 if __name__ == "__main__":
@@ -2231,31 +2252,15 @@ if __name__ == "__main__":
 
     if system_choice == "2":
         print("Using Single-Agent System...")
-        single_system = SingleAgentTradingSystem(api_config)
         result = run_ultimate_system()
-        results = (result, None, None)
     else:
         print("Using Enhanced Multi-Agent System...")
-        results = run_enhanced_examples()
-    
-    # Display results
-    if results[0] is not None:
-        print("\n" + "=" * 70)
-        print("📈 CLAUDE ANALYSIS RESULTS:")
-        print("=" * 70)
-        
-        for i, result in enumerate(results[:2], 1):
-            if result:
-                print(f"\n--- RESULT {i} ---")
-                try:
-                    display(Markdown(result.raw if hasattr(result, 'raw') else str(result)))
-                except (NameError, AttributeError):
-                    result_text = result.raw if hasattr(result, 'raw') else str(result)
-                    print(result_text)
-        
+        result = run_enhanced_examples()
+
+    # Display result
+    if _display_result(result):
         print(f"\n💰 Check console.anthropic.com for exact costs")
         print(f"📞 API calls made: Variable based on analysis complexity")
-        
     else:
         print("❌ System failed to initialize or run.")
         print("🔍 Check:")
