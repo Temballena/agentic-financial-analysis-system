@@ -75,12 +75,12 @@ import random
 def setup_claude_llms(api_config: APIConfig):
     """PROFESSIONAL: Strategic multi-model LLM setup for zero-failure reliability"""
     try:
-        # Test connection first (unchanged)
+        # Test connection first
         test_client = anthropic.Anthropic(
             api_key=api_config.claude_api_key,
             base_url=api_config.claude_base_url
         )
-        
+
         test_message = test_client.messages.create(
             model=api_config.claude_model,
             max_tokens=50,
@@ -88,13 +88,19 @@ def setup_claude_llms(api_config: APIConfig):
                 {"role": "user", "content": "Test connection. Respond with 'Claude connected successfully.'"}
             ]
         )
-        
-        if "Claude connected successfully" in test_message.content[0].text:
+
+        response_text = ""
+        if test_message.content and hasattr(test_message.content[0], "text"):
+            response_text = test_message.content[0].text
+
+        if "Claude connected successfully" in response_text:
             print("Professional-grade Claude connection validated")
-        
+        else:
+            print("Claude responded with unexpected content - proceeding anyway")
+
         # STRATEGIC LLM ASSIGNMENT FOR 4-AGENT SYSTEM
         llm_configs = {}
-        
+
         # Technical Analysis: Sonnet 4 (Pattern Recognition Excellence)
         llm_configs['technical'] = LLM(
             model="anthropic/claude-sonnet-4-20250514",
@@ -103,7 +109,7 @@ def setup_claude_llms(api_config: APIConfig):
             timeout=120,
             extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"}
         )
-        
+
         # Sentiment Analysis: Sonnet 4 (Nuanced Market Psychology)
         llm_configs['sentiment'] = LLM(
             model="anthropic/claude-sonnet-4-20250514",
@@ -112,7 +118,7 @@ def setup_claude_llms(api_config: APIConfig):
             timeout=120,
             extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"}
         )
-        
+
         # Risk Management: Haiku 3.5 (High Context Processing)
         llm_configs['risk'] = LLM(
             model="anthropic/claude-3-5-haiku-20241022",
@@ -121,9 +127,8 @@ def setup_claude_llms(api_config: APIConfig):
             timeout=120,
             extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"}
         )
-        
-        # Portfolio Manager: Opus 4 for final decisions. No silent fallback —
-        # if Opus isn't available on this account, fail loudly at startup.
+
+        # Portfolio Manager: Opus 4 for final decisions
         llm_configs['portfolio'] = LLM(
             model="anthropic/claude-opus-4-20250514",
             api_key=api_config.claude_api_key,
@@ -131,8 +136,7 @@ def setup_claude_llms(api_config: APIConfig):
             timeout=180,
             extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"}
         )
-        print("Claude Opus assigned for portfolio decisions")
-        
+
         # Manager LLM: sonnet for efficient coordination
         manager_llm = LLM(
             model="anthropic/claude-3-7-sonnet-20250219",
@@ -141,16 +145,16 @@ def setup_claude_llms(api_config: APIConfig):
             timeout=120,
             extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"}
         )
-        
+
         print("STRATEGIC MODEL ASSIGNMENT COMPLETE:")
         print(f"Technical: Sonnet 4 ({api_config.technical_agent_tokens} tokens)")
         print(f"Sentiment: Sonnet 4 ({api_config.sentiment_agent_tokens} tokens)")
-        print(f"Risk: Haiku 3.5 ({api_config.risk_agent_tokens} tokens, 50k input)")
-        print(f"Portfolio: Opus/Sonnet 4 ({api_config.portfolio_manager_tokens} tokens)")
-        print("Manager: Haiku 3.5 (coordination)")
-        
+        print(f"Risk: Haiku 3.5 ({api_config.risk_agent_tokens} tokens)")
+        print(f"Portfolio: Opus 4 ({api_config.portfolio_manager_tokens} tokens)")
+        print("Manager: Sonnet 3.7 (coordination)")
+
         return llm_configs, manager_llm
-        
+
     except Exception as e:
         print(f"Strategic LLM initialization failed: {e}")
         return None, None
@@ -1066,12 +1070,13 @@ class EnhancedTradingSystem:
         self.agents = create_enhanced_agents(self.llm_configs)
         self.tasks = create_enhanced_tasks(self.agents)
         self.api_call_count = 0
+        self.delay_count = 0
 
 
     def professional_delay(self, phase: str, agent_name: str = None, context_size: int = 0):
         """Professional-grade delay system for zero-failure reliability"""
-    
-    # Phase-specific delays for optimal reliability
+
+        # Phase-specific delays for optimal reliability
         phase_delays = {
             'initialization': 10.0,
             'technical_analysis': 15.0,
@@ -1080,26 +1085,26 @@ class EnhancedTradingSystem:
             'final_decision': 30.0,
             'completion': 5.0
         }
-    
+
         base_delay = phase_delays.get(phase, self.api_config.rate_limit_delay)
-    
-    # Additional context processing delay
+
+        # Additional context processing delay
         if context_size > 15000:
             context_delay = self.api_config.context_processing_delay * 2
         elif context_size > 8000:
             context_delay = self.api_config.context_processing_delay
         else:
             context_delay = 0
-    
+
         total_delay = base_delay + context_delay + random.uniform(1, 3)
-    
+
         print(f"Professional rate limiting: {phase}")
         if agent_name:
             print(f"Processing agent: {agent_name}")
         print(f"Waiting {total_delay:.1f}s for reliable execution...")
-    
+
         time.sleep(total_delay)
-        self.api_call_count += 1
+        self.delay_count += 1
         
     def create_crew(self, analysis_mode: str = "smart"):
         """PROFESSIONAL: Create 4-agent crew with strategic model assignment"""
@@ -1300,21 +1305,21 @@ class EnhancedTradingSystem:
         if result is None:
             print("❌ No result to save")
             return None
-            
+
         try:
             # Create results directory if it doesn't exist
             import os
             results_dir = "trading_analysis_results"
             os.makedirs(results_dir, exist_ok=True)
-            
+
             # Generate timestamped filename
             from datetime import datetime
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"{results_dir}/{stock_symbol}_{analysis_type}_{timestamp}.md"
-            
+
             # Extract content
             content = result.raw if hasattr(result, 'raw') else str(result)
-            
+
             # Create formatted markdown
             markdown_content = f"""# Financial Analysis Report: {stock_symbol}
 **Analysis Type:** {analysis_type.title()}  
@@ -1327,17 +1332,16 @@ class EnhancedTradingSystem:
 {content}
 
 ---
-*Generated by Enhanced Multi-Agent Trading System*  
-*Powered by Claude Opus 4*
+*Generated by Enhanced Multi-Agent Trading System*
 """
-            
+
             # Save to file
             with open(filename, 'w', encoding='utf-8') as f:
                 f.write(markdown_content)
-            
+
             print(f"✅ Analysis saved to: {filename}")
             return filename
-            
+
         except Exception as e:
             print(f"❌ Failed to save analysis: {e}")
             return None
@@ -1932,10 +1936,10 @@ Review the technical levels, sentiment indicators, and current price action to m
         try:
             import os
             from datetime import datetime
-            
+
             os.makedirs("trading_analysis_results", exist_ok=True)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            
+
             # Build filename
             filename_parts = [ticker]
             if strategy:
@@ -1943,11 +1947,11 @@ Review the technical levels, sentiment indicators, and current price action to m
             if mode:
                 filename_parts.append(mode)
             filename_parts.append(timestamp)
-            
+
             filename = f"trading_analysis_results/{'_'.join(filename_parts)}.md"
-            
+
             content = result if isinstance(result, str) else (result.raw if hasattr(result, 'raw') else str(result))
-            
+
             markdown_content = f"""# {ticker} Analysis Report
 **Strategy:** {strategy or 'General'}  
 **Mode:** {mode or 'Unknown'}  
@@ -1959,15 +1963,15 @@ Review the technical levels, sentiment indicators, and current price action to m
 {content}
 
 ---
-*Generated by Ultimate Single-Agent Trading System with Claude Opus 4*
+*Generated by Ultimate Single-Agent Trading System*
 """
-            
+
             with open(filename, 'w', encoding='utf-8') as f:
                 f.write(markdown_content)
-            
+
             print(f"📁 Analysis saved to: {filename}")
             return filename
-            
+
         except Exception as e:
             print(f"⚠️ Saving failed: {e}")
             return None
