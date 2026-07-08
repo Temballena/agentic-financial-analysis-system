@@ -425,6 +425,21 @@ def enhanced_financial_data_tool(ticker: str, period: str = "1y", interval: str 
     if hist.empty:
         return f"Error: No data found for {ticker} in period {period}"
 
+    # Detect under-coverage: the cache holds ~2y of daily bars, so any request
+    # for more than that silently returns less. Flag it instead of mislabeling.
+    period_trading_days = {
+        "1d": 1, "5d": 5, "1mo": 22, "3mo": 65, "6mo": 126,
+        "1y": 252, "2y": 504, "5y": 1260, "max": None,
+    }
+    requested_days = period_trading_days.get(period)
+    coverage_note = ""
+    if requested_days is not None and requested_days > len(hist):
+        coverage_note = (
+            f"\n⚠️ COVERAGE NOTE: {period} requested (~{requested_days} trading days) "
+            f"but only {len(hist)} are available (data window is ~2 years). "
+            f"All figures below reflect {len(hist)} trading days, not the full {period}."
+        )
+
     # Map interval to annualization factor (periods per year) for volatility
     interval_periods_per_year = {
         "1m": 252 * 6.5 * 60,
@@ -522,7 +537,7 @@ def enhanced_financial_data_tool(ticker: str, period: str = "1y", interval: str 
 
     analysis = f"""
 COMPREHENSIVE ANALYSIS FOR {ticker}:
-
+{coverage_note}
 PRICE DATA:
 - Current Price: ${current_price:.2f}
 - Daily Change: {price_change:.2f}%
@@ -805,20 +820,28 @@ def portfolio_analysis_tool(tickers: str, weights: str = "equal") -> str:
                 weight_values = np.array([1.0 / len(ticker_list)] * len(ticker_list))
             else:
                 weight_array = np.array(weight_list, dtype=float)
-                weight_sum = weight_array.sum()
 
-                if weight_sum <= 0:
+                if (weight_array < 0).any():
                     weight_warnings.append(
-                        f"⚠️ Weight sum is {weight_sum:.4f} (must be positive). "
-                        f"Falling back to equal weights."
+                        f"⚠️ Negative weight(s) in '{weights}'. This portfolio math "
+                        f"assumes long-only positions; falling back to equal weights."
                     )
                     weight_values = np.array([1.0 / len(ticker_list)] * len(ticker_list))
                 else:
-                    weight_values = weight_array / weight_sum
-                    if not np.isclose(weight_sum, 1.0, atol=0.01):
+                    weight_sum = weight_array.sum()
+
+                    if weight_sum <= 0:
                         weight_warnings.append(
-                            f"ℹ️ Weights summed to {weight_sum:.4f}, normalized to 1.0."
+                            f"⚠️ Weight sum is {weight_sum:.4f} (must be positive). "
+                            f"Falling back to equal weights."
                         )
+                        weight_values = np.array([1.0 / len(ticker_list)] * len(ticker_list))
+                    else:
+                        weight_values = weight_array / weight_sum
+                        if not np.isclose(weight_sum, 1.0, atol=0.01):
+                            weight_warnings.append(
+                                f"ℹ️ Weights summed to {weight_sum:.4f}, normalized to 1.0."
+                            )
 
         # Print warnings immediately so they're visible during runs
         for warning in weight_warnings:
@@ -890,7 +913,7 @@ RECOMMENDATIONS:
 
     except Exception as e:
         return f"Error in portfolio analysis: {e}"
-
+        
 # --- Enhanced Agent Definitions ---
 
 def create_enhanced_agents(llm_configs):
